@@ -1,0 +1,621 @@
+#pragma config(I2C_Usage, I2C1, i2cSensors)
+#pragma config(Sensor, dgtl1,  sonar1,         sensorSONAR_cm)
+#pragma config(Sensor, dgtl3,  led1,           sensorLEDtoVCC)
+#pragma config(Sensor, I2C_1,  flywheel1,      sensorQuadEncoderOnI2CPort,    , AutoAssign)
+#pragma config(Sensor, I2C_2,  flywheel2,      sensorQuadEncoderOnI2CPort,    , AutoAssign)
+#pragma config(Motor,  port1,           treadmill1,    tmotorVex393TurboSpeed_HBridge, openLoop)
+#pragma config(Motor,  port2,           frontRight,    tmotorVex393HighSpeed_MC29, openLoop)
+#pragma config(Motor,  port3,           frontLeft,     tmotorVex393HighSpeed_MC29, openLoop)
+#pragma config(Motor,  port4,           backRight,     tmotorVex393HighSpeed_MC29, openLoop)
+#pragma config(Motor,  port5,           backLeft,      tmotorVex393HighSpeed_MC29, openLoop)
+#pragma config(Motor,  port6,           tlLauncher,    tmotorVex393TurboSpeed_MC29, openLoop)
+#pragma config(Motor,  port7,           trLauncher,    tmotorVex393TurboSpeed_MC29, openLoop, reversed)
+#pragma config(Motor,  port8,           brLauncher,    tmotorVex393TurboSpeed_MC29, openLoop, encoderPort, I2C_2)
+#pragma config(Motor,  port9,           blLauncher,    tmotorVex393TurboSpeed_MC29, openLoop, reversed, encoderPort, I2C_1)
+#pragma config(Motor,  port10,          treadmill2,    tmotorVex393TurboSpeed_HBridge, openLoop)
+
+#pragma platform(VEX)
+
+//The TBH code is based off JPearman's 
+
+//Competition Control and Duration Settings
+#pragma competitionControl(Competition)
+#pragma autonomousDuration(20)
+#pragma userControlDuration(120)
+
+#include "Vex_Competition_Includes.c"   //Main competition background code...do not modify!
+
+// Update inteval (in mS) for the flywheel control loop
+#define FW_LOOP_SPEED              25
+
+// Maximum power we want to send to the flywheel motors
+#define FW_MAX_POWER              127
+
+// encoder counts per revolution depending on motor
+#define MOTOR_TPR_393R          627.2
+#define MOTOR_TPR_393S          392
+#define MOTOR_TPR_393T          261.333
+#define MOTOR_TPR_QUAD          360.0
+
+
+int count = 0;
+const short leftButton = 1;
+const short centerButton = 2;
+const short rightButton = 4;
+
+// Dead Zone Variables
+int X2 = 0, Y1 = 0, X1 = 0, threshold = 15;
+
+typedef struct _fw_controller {
+	long counter;                ///< loop counter used for debug
+	// encoder tick per revolution
+	float ticks_per_rev;          ///< encoder ticks per revolution
+// Encoder
+	long e_current;              ///< current encoder count
+	long e_last;                 ///< current encoder count
+    // velocity measurement
+	float v_current;              ///< current velocity in rpm
+	long v_time;                 ///< Time of last velocity calculation
+	// TBH control algorithm variables
+	long target;                 ///< target velocity
+	long current;                ///< current velocity
+	long last;                   ///< last velocity
+	float error;                  ///< error between actual and target velocities
+	float last_error;             ///< error last time update called
+	float gain;                   ///< gain
+	float drive;                  ///< final drive out of TBH (0.0 to 1.0)
+	float drive_at_zero;          ///< drive at last zero crossing
+	long  first_cross;            ///< flag indicating first zero crossing
+	float drive_approx;           ///< estimated open loop drive
+// final motor drive
+	long motor_drive;            ///< final motor control value
+	float TargetSpeed;
+	float CurrentSpeed;
+} fw_controller,treadmill;
+treadmill feed;
+
+// Make the controller global for easy debugging
+static  fw_controller   flywheel;
+
+/*-----------------------------------------------------------------------------*/
+/** @brief      Set the flywheen motors                                        */
+/** @param[in]  value motor control value                                      */
+/*-----------------------------------------------------------------------------*/
+void
+FwMotorSet( int value )
+{
+	motor[ tlLauncher ] = value;
+	motor[ blLauncher ] = value;
+	motor[ brLauncher ] = value;
+	motor[ brLauncher ] = value;
+}
+/*-----------------------------------------------------------------------------*/
+/** @brief      Get the flywheen motor encoder count                           */
+/*-----------------------------------------------------------------------------*/
+long
+FwMotorEncoderGet()
+{
+	return( nMotorEncoder[ blLauncher ] );
+}
+
+/*-----------------------------------------------------------------------------*/
+/** @brief      Set the controller position                                    */
+/** @param[in]  fw pointer to flywheel controller structure                    */
+/** @param[in]  desired velocity                                               */
+/** @param[in]  predicted_drive estimated open loop motor drive                */
+/*-----------------------------------------------------------------------------*/
+void
+FwVelocitySet( fw_controller *fw, int velocity, float predicted_drive )
+{
+	// set target velocity (motor rpm)
+	fw->target = velocity;
+
+	// Set error so zero crossing is correctly detected
+	fw->error = fw->target - fw->current;
+	fw->last_error = fw->error;
+
+	// Set predicted open loop drive value
+	fw->drive_approx  = predicted_drive;
+	// Set flag to detect first zero crossing
+	fw->first_cross   = 1;
+	// clear tbh variable
+	fw->drive_at_zero = 0;
+}
+
+/*-----------------------------------------------------------------------------*/
+/** @brief      Calculate the current flywheel motor velocity                  */
+/** @param[in]  fw pointer to flywheel controller structure                    */
+/*-----------------------------------------------------------------------------*/
+void
+FwCalculateSpeed( fw_controller *fw )
+{
+	int     delta_ms;
+	int     delta_enc;
+
+	// Get current encoder value
+	fw->e_current = FwMotorEncoderGet();
+
+	// This is just used so we don't need to know how often we are called
+	// how many mS since we were last here
+	delta_ms   = nSysTime - fw->v_time;
+	fw->v_time = nSysTime;
+
+	// Change in encoder count
+	delta_enc = (fw->e_current - fw->e_last);
+
+	// save last position
+	fw->e_last = fw->e_current;
+
+	// Calculate velocity in rpm
+	fw->v_current = (1000.0 / delta_ms) * delta_enc * 60.0 / fw->ticks_per_rev;
+}
+
+void
+FwControlUpdateVelocityTbh( fw_controller *fw )
+{
+	// calculate error in velocity
+	// target is desired velocity
+	// current is measured velocity
+	fw->error = fw->target - fw->current;
+
+	// Use Kp as gain
+	fw->drive =  fw->drive + (fw->error * fw->gain);
+
+	// Clip - we are only going forwards
+	if( fw->drive > 1 )
+		fw->drive = 1;
+	if( fw->drive < 0 )
+		fw->drive = 0;
+
+	// Check for zero crossing
+	if( sgn(fw->error) != sgn(fw->last_error) ) {
+		// First zero crossing after a new set velocity command
+		if( fw->first_cross ) {
+			// Set drive to the open loop approximation
+			fw->drive = fw->drive_approx;
+			fw->first_cross = 0;
+		}
+		else
+			fw->drive = 0.5 * ( fw->drive + fw->drive_at_zero );
+
+		// Save this drive value in the "tbh" variable
+		fw->drive_at_zero = fw->drive;
+	}
+
+	// Save last error
+	fw->last_error = fw->error;
+}
+
+task FwControlTask()
+{
+	fw_controller *fw = &flywheel;
+
+	// Set the gain
+	fw->gain = 0.00025;
+
+	// We are using Turbo geared motors
+	// Set the encoder ticks per revolution
+	fw->ticks_per_rev = MOTOR_TPR_393T;
+
+	while(1)
+	{
+		// debug counter
+		fw->counter++;
+
+		// Calculate velocity
+		FwCalculateSpeed( fw );
+
+		// Set current speed for the tbh calculation code
+		fw->current = fw->v_current;
+
+		// Do the velocity TBH calculations
+		FwControlUpdateVelocityTbh( fw ) ;
+
+		// Scale drive into the range the motors need
+		fw->motor_drive  = (fw->drive * FW_MAX_POWER) + 0.5;
+
+		// Final Limit of motor values - don't really need this
+		if( fw->motor_drive >  127 ) fw->motor_drive =  127;
+		if( fw->motor_drive < -127 ) fw->motor_drive = -127;
+
+		// and finally set the motor control value
+		FwMotorSet( fw->motor_drive );
+
+		// Run at somewhere between 20 and 50mS
+		wait1Msec( FW_LOOP_SPEED );
+	}
+}
+
+
+void treadSpeed(int speed){
+	motor[treadmill1] = speed;
+	motor[treadmill2] = speed;
+}
+
+void UpdateTreadmillSpeed()
+{
+	feed.CurrentSpeed = feed.TargetSpeed;
+	motor[treadmill1] = feed.CurrentSpeed;
+	motor[treadmill2] = feed.CurrentSpeed;
+}
+
+// Creates a deadzone for your motors
+void deadZoneCheck()
+{
+
+	//Create "deadzone" for Y1/Ch3
+	if(abs(vexRT[Ch1]) > threshold)
+		Y1 = vexRT[Ch1];
+	else
+		Y1 = 0;
+	//Create "deadzone" for X1/Ch1
+	if(abs(vexRT[Ch4]) > threshold)
+		X2 = vexRT[Ch4];
+	else
+		X2 = 0;
+	//Create "deadzone" for X2/Ch4
+	if(abs(vexRT[Ch3]) > threshold)
+		X1 = vexRT[Ch3];
+	else
+		X1	 = 0;
+}
+
+task Drive()
+{
+	while(true)
+	{
+		deadZoneCheck();
+
+		// Remote Control Commands
+		motor[frontLeft] = Y1  +X2  +X1;
+		motor[frontRight]= Y1  -X2  +X1;
+		motor[backLeft]  = Y1  +X2  -X1;
+		motor[backRight] = Y1  -X2  -X1;
+
+		// dont hog CPU
+		wait1Msec(30);
+	}
+}
+
+void waitForPress()
+{
+	while(nLCDButtons == 0){}
+	wait1Msec(5);
+}
+
+void waitForRelease()
+{
+	while(nLCDButtons != 0){}
+	wait1Msec(5);
+}
+
+string mainBattery, backupBattery;
+void showBatteryLevel()
+{
+	bLCDBacklight = true;
+	displayLCDString(0, 0, "Primary: ");
+	sprintf(mainBattery, "%1.2f%c", nImmediateBatteryLevel/1000.0,'V');
+	displayNextLCDString(mainBattery);
+
+	displayLCDString(1, 0, "Backup: ");
+	sprintf(backupBattery, "%1.2f%c", BackupBatteryLevel/1000.0, 'V');
+	displayNextLCDString(backupBattery);
+}
+
+
+/////////////////////////////////////////////////////////////////////////////////////////
+//
+//                          Pre-Autonomous Functions
+//
+// You may want to perform some actions before the competition starts. Do them in the
+// following function.
+//
+/////////////////////////////////////////////////////////////////////////////////////////
+
+void pre_auton()
+{
+  // Set bStopTasksBetweenModes to false if you want to keep user created tasks running between
+  // Autonomous and Tele-Op modes. You will need to manage all user created tasks if set to false.
+  bStopTasksBetweenModes = false;
+
+	// All activities that occur before the competition starts
+	// Example: clearing encoders, setting servo positions, ..
+  // All activities that occur before the competition starts
+	// Example: clearing encoders, setting servo positions, ...
+	clearLCDLine(0);
+	clearLCDLine(1);
+	while(nLCDButtons != centerButton)
+	{
+		bLCDBacklight = true;
+
+		switch(count){
+		case 0:
+
+			displayLCDCenteredString(0, "4 Ball Launch");
+			displayLCDCenteredString(1, "<		 Enter		>");
+			waitForPress();
+
+
+			if(nLCDButtons == rightButton)
+			{
+				waitForRelease();
+				count++;
+			}
+			break;
+
+		case 1:
+			displayLCDCenteredString(0, "2");
+			displayLCDCenteredString(1, "<		 Enter		>");
+			waitForPress();
+			if(nLCDButtons == leftButton)
+			{
+				waitForRelease();
+				count--;
+			}
+
+			else if(nLCDButtons == rightButton)
+			{
+				waitForRelease();
+				count++;
+			}
+			break;
+
+		case 2:
+			displayLCDCenteredString(0, "3");
+			displayLCDCenteredString(1, "<		 Enter		>");
+			waitForPress();
+
+			if(nLCDButtons == leftButton)
+			{
+				waitForRelease();
+				count--;
+			}
+
+		case 3:
+			displayLCDCenteredString(0, "4");
+			displayLCDCenteredString(1, "<		 Enter		>");
+			waitForPress();
+
+			if(nLCDButtons == leftButton)
+			{
+				waitForRelease();
+				count--;
+			}
+
+			else if(nLCDButtons == rightButton)
+			{
+				waitForRelease();
+				count++;
+			}
+			break;
+
+		case 4:
+			displayLCDCenteredString(0, "5");
+			displayLCDCenteredString(1, "<		 Enter		>");
+			waitForPress();
+			if(nLCDButtons == leftButton)
+			{
+				waitForRelease();
+				count--;
+			}
+
+			else if(nLCDButtons == rightButton)
+			{
+				waitForRelease();
+				count++;
+			}
+			break;
+
+		case 5:
+			displayLCDCenteredString(0, "6");
+			displayLCDCenteredString(1, "<		 Enter		>");
+			waitForPress();
+			if(nLCDButtons == leftButton)
+			{
+				waitForRelease();
+				count--;
+			}
+
+			else if(nLCDButtons == rightButton)
+			{
+				waitForRelease();
+				count++;
+			}
+			break;
+
+		case 6:
+			displayLCDCenteredString(0, "7");
+			displayLCDCenteredString(1, "<		 Enter		>");
+			waitForPress();
+			if(nLCDButtons == leftButton)
+			{
+				waitForRelease();
+				count--;
+			}
+
+			else if(nLCDButtons == rightButton)
+			{
+				waitForRelease();
+				count++;
+			}
+			break;
+
+
+
+			string mainBattery, backupBattery;
+			showBatteryLevel();
+
+			wait1Msec(100);
+
+			waitForPress();
+			if(nLCDButtons == leftButton)
+			{
+				waitForRelease();
+				count--;
+			}
+			else if(nLCDButtons == rightButton)
+			{
+				waitForRelease();
+				count = 0;
+			}
+			break;
+		default:
+			count = 0;
+			break;
+
+		}
+	}
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
+//
+//                                 Autonomous Task
+//
+// This task is used to control your robot during the autonomous phase of a VEX Competition.
+// You must modify the code to add your own robot specific commands here.
+//
+/////////////////////////////////////////////////////////////////////////////////////////
+
+task autonomous()
+{
+  // .....................................................................................
+  // Insert user code here.
+  // .....................................................................................
+
+	// .....................................................................................
+	// Insert user code here.
+	bLCDBacklight = true;
+	clearLCDLine(0);
+	clearLCDLine(1);
+
+	switch(count){
+
+	case 0:
+		displayLCDCenteredString(0, "4 Ball Launch");
+		displayLCDCenteredString(1, "is running!");
+		wait1Msec(500);
+		//autonomous goes here
+
+
+
+
+
+		break;
+
+	case 1:
+		displayLCDCenteredString(0, "2");
+		displayLCDCenteredString(1, "is running!");
+		wait1Msec(500);
+		//autonomous goes here
+
+		break;
+
+	case 2:
+		displayLCDCenteredString(0, "Nonpin (3)");
+		displayLCDCenteredString(1, "is running!");
+		wait1Msec(500);
+		//autonomous goes here
+
+		break;
+
+	case 3:
+		displayLCDCenteredString(0, "Blue Nonpin (6)");
+		displayLCDCenteredString(1, "is running!");
+		wait1Msec(500);
+		//autonomous goes here
+
+		break;
+
+	case 4:
+		displayLCDCenteredString(0, "Red Nonpin (6)");
+		displayLCDCenteredString(1, "is running!");
+		wait1Msec(500);
+		//autonomous goes here
+
+		break;
+
+	case 5:
+		displayLCDCenteredString(0, "NOTHING YET");
+		displayLCDCenteredString(1, "is running!");
+		wait1Msec(500);
+		//autonomous goes here
+
+		break;
+
+	case 6:
+		displayLCDCenteredString(0, "NOTHING YET");
+		displayLCDCenteredString(1, "is running!");
+		wait1Msec(500);
+		//autonomous goes here
+
+		break;
+
+
+	default:
+		displayLCDCenteredString(0, "No valid choice");
+		displayLCDCenteredString(1, "was made!");
+		break;
+
+	}
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
+//
+//                                 User Control Task
+//
+// This task is used to control your robot during the user control phase of a VEX Competition.
+// You must modify the code to add your own robot specific commands here.
+//
+/////////////////////////////////////////////////////////////////////////////////////////
+
+task usercontrol()
+{
+	// User control code here, inside the loop
+
+	while (true)
+	{
+		char  str[32];
+
+	  // This is the main execution loop for the user control program. Each time through the loop
+	  // your program should update motor + servo values based on feedback from the joysticks.
+
+	  // .....................................................................................
+	  // Insert user code here. This is where you use the joystick values to update your motors, etc.
+	  // .....................................................................................
+
+	 	wait1Msec(5);
+		startTask( FwControlTask );
+	 		startTask( Drive );
+
+	 		if( vexRT[ Btn8L ] == 1 )
+				FwVelocitySet( &flywheel, 220, 0.55 );// speed(in rpm)
+			if( vexRT[ Btn8U ] == 1 )
+				FwVelocitySet( &flywheel, 180, 0.38 );
+			if( vexRT[ Btn8R ] == 1 )
+				FwVelocitySet( &flywheel, 0, 0 );
+			if( vexRT[ Btn8D ] == 1 )
+				FwVelocitySet( &flywheel,150 , 0.2 );
+
+	 			if(vexRT[Btn6U] == 1)
+		{
+			feed.TargetSpeed = 127;
+		}
+		else if(vexRT[Btn6D] == 1)
+		{
+			feed.TargetSpeed = -127;
+		}
+		else
+		{
+			feed.TargetSpeed = 0;
+		}
+
+		// Display useful things on the LCD
+			sprintf( str, "%4d %4d  %5.2f", flywheel.target,  flywheel.current, nImmediateBatteryLevel/1000.0 );
+			displayLCDString(0, 0, str );
+			sprintf( str, "%4.2f %4.2f ", flywheel.drive, flywheel.drive_at_zero );
+			displayLCDString(1, 0, str );
+    UpdateTreadmillSpeed();
+    wait1Msec(25);
+
+	}
+}
