@@ -16,7 +16,6 @@
 
 #pragma platform(VEX)
 
-//The TBH code is based off JPearman's 
 
 //Competition Control and Duration Settings
 #pragma competitionControl(Competition)
@@ -26,7 +25,7 @@
 #include "Vex_Competition_Includes.c"   //Main competition background code...do not modify!
 
 // Update inteval (in mS) for the flywheel control loop
-#define FW_LOOP_SPEED              25
+#define FW_LOOP_SPEED              100
 
 // Maximum power we want to send to the flywheel motors
 #define FW_MAX_POWER              127
@@ -191,7 +190,7 @@ task FwControlTask()
 	fw_controller *fw = &flywheel;
 
 	// Set the gain
-	fw->gain = 0.00025;
+	fw->gain = 0.0025;
 
 	// We are using Turbo geared motors
 	// Set the encoder ticks per revolution
@@ -588,13 +587,13 @@ task usercontrol()
 	 		startTask( Drive );
 
 	 		if( vexRT[ Btn8L ] == 1 )
-				FwVelocitySet( &flywheel, 220, 0.55 );// speed(in rpm)
+				FwVelocitySet( &flywheel, 220, 0.55);// speed(in rpm)
 			if( vexRT[ Btn8U ] == 1 )
-				FwVelocitySet( &flywheel, 180, 0.38 );
+				FwVelocitySet( &flywheel, 175, 0.45 );
 			if( vexRT[ Btn8R ] == 1 )
 				FwVelocitySet( &flywheel, 0, 0 );
 			if( vexRT[ Btn8D ] == 1 )
-				FwVelocitySet( &flywheel,150 , 0.2 );
+				FwVelocitySet( &flywheel,150 , 0.25 );
 
 	 			if(vexRT[Btn6U] == 1)
 		{
