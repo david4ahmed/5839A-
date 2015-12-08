@@ -266,10 +266,10 @@ task Drive()
 		deadZoneCheck();
 
 		// Remote Control Commands
-		motor[frontLeft] = Y1  +X2  +X1;
-		motor[frontRight]= Y1  -X2  +X1;
-		motor[backLeft]  = Y1  +X2  -X1;
-		motor[backRight] = Y1  -X2  -X1;
+		motor[frontLeft] = Y1*.75  +X2  +X1;
+		motor[frontRight]= Y1*.75  -X2  +X1;
+		motor[backLeft]  = Y1*.75  +X2  -X1;
+		motor[backRight] = Y1*.75  -X2  -X1;
 
 		// dont hog CPU
 		wait1Msec(30);
@@ -302,7 +302,7 @@ void showBatteryLevel()
 }
 
 
-/////////////////////////////////////////////////////////////////////////////////////////
+ /////////////////////////////////////////////////////////////////////////////////////////
 //
 //                          Pre-Autonomous Functions
 //
@@ -315,7 +315,7 @@ void pre_auton()
 {
   // Set bStopTasksBetweenModes to false if you want to keep user created tasks running between
   // Autonomous and Tele-Op modes. You will need to manage all user created tasks if set to false.
-  bStopTasksBetweenModes = false;
+  bStopTasksBetweenModes = true;
 
 	// All activities that occur before the competition starts
 	// Example: clearing encoders, setting servo positions, ..
@@ -495,6 +495,21 @@ task autonomous()
 		wait1Msec(500);
 		//autonomous goes here
 
+		startTask( FwControlTask );
+		FwVelocitySet( &flywheel, 240, 1.0);
+		wait1Msec(2000);
+		FwVelocitySet( &flywheel, 240, 1.0);
+		feed.TargetSpeed = 30;
+		UpdateTreadmillSpeed();
+		wait1Msec(7000);
+		feed.TargetSpeed = 0;
+		UpdateTreadmillSpeed();
+		FwVelocitySet(&flywheel, 0, 0);
+		stopTask(FwControlTask);
+
+
+
+
 
 
 
@@ -587,13 +602,15 @@ task usercontrol()
 	 		startTask( Drive );
 
 	 		if( vexRT[ Btn8L ] == 1 )
-				FwVelocitySet( &flywheel, 220, 0.55);// speed(in rpm)
+				FwVelocitySet( &flywheel, 220, 0.75);// speed(in rpm)
 			if( vexRT[ Btn8U ] == 1 )
-				FwVelocitySet( &flywheel, 175, 0.45 );
+				FwVelocitySet( &flywheel, 175, 0.50 );
 			if( vexRT[ Btn8R ] == 1 )
 				FwVelocitySet( &flywheel, 0, 0 );
 			if( vexRT[ Btn8D ] == 1 )
-				FwVelocitySet( &flywheel,150 , 0.25 );
+				FwVelocitySet( &flywheel,167 , 0.48 );
+			if( vexRT[ Btn7R ] == 1 )
+			FwVelocitySet( &flywheel,165 , 0.40 );
 
 	 			if(vexRT[Btn6U] == 1)
 		{
